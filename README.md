@@ -25,13 +25,21 @@ capteur et décode la charge utile en direct, ou décode une trame hex collée.
 
 24-byte frame, little-endian where applicable:
 
-| Index    | Field                               | Notes                                          |
-| -------- | ----------------------------------- | ---------------------------------------------- |
-| `5`      | Message counter / compteur          | ignore                                         |
-| `13:14`  | Estimated PV power / puissance PV   | watts (W)                                      |
-| `18:19`  | Irradiance                          | `raw & 0x3FFF` then `/ 10` → W/m²              |
-| `19` MSB | Status flags                        | top 2 bits of byte 19                          |
-| `20`     | Cell temperature / température      | `(raw - 150) * 0.4` → °C, 0.4 °C resolution    |
+| Index     | Field                               | Notes                                                |
+| --------- | ----------------------------------- | ---------------------------------------------------- |
+| `0`       | Record type                         | constant `0x10`                                      |
+| `1`       | State flag                          | toggles `0x00` ↔ `0x80`, meaning unknown             |
+| `2:4`     | Device id                           | constant `0x50 0xc0 0xff`                            |
+| `5:6` LE  | Message counter / compteur          | 16-bit, useful for RX quality diagnostics            |
+| `7:12`    | Firmware / product info             | constant, first byte = `0x01` (firmware 1.01)        |
+| `13:14`   | Estimated PV power / puissance PV   | watts (W)                                            |
+| `15:16`   | Today's yield                       | `raw * 0.625` → Wh (validated on 3 datapoints)       |
+| `17`      | —                                   | constant `0x00`                                      |
+| `18:19`   | Irradiance                          | `raw & 0x3FFF` then `/ 10` → W/m²                    |
+| `19` MSB  | Status flags                        | top 2 bits; `11` in sunlight, `10` in darkness       |
+| `20`      | Cell temperature / température      | `(raw - 150) * 0.4` → °C, 0.4 °C resolution          |
+| `21`      | Diagnostic byte                     | varies (`0x42`, `0x46`, `0x4a` seen), role unknown   |
+| `22:23`   | —                                   | constant `0x07 0xfc` (not a CRC)                     |
 
 ## Requirements
 
@@ -57,12 +65,15 @@ uv run solarsense_decode.py scan
 Sample output:
 
 ```
---- RSSI -62 dBm ---
-  counter      : 142
-  irradiance   : 824.3 W/m²   (flags=00)
-  pv_power     : 187 W
-  cell_temp    : 41.6 °C
-  bytes/octets : 0:10 1:e1 2:02 3:... ...
+--- RSSI -48 dBm ---
+  counter      : 13990
+  irradiance   : 46.0 W/m²   (flags=11)
+  pv_power     : 391 W
+  yield        : 6630.0 Wh        (raw=10608)
+  cell_temp    : 23.2 °C
+  state_flag   : 0x80
+  diag_21      : 0x42
+  bytes/octets : 0:10 1:80 2:50 3:c0 4:ff 5:a6 6:36 7:01 8:05 9:14 ...
 ```
 
 ### 2. Offline decode / Décodage hors-ligne
@@ -100,10 +111,16 @@ Differential analysis on a long capture:
 
 ## Status / Statut
 
-- ✅ Irradiance, PV power, cell temperature
-- 🟡 Status flags (top 2 bits of byte 19) — meaning not yet fully confirmed
-- 🟡 Remaining bytes — likely sensor health / diagnostics, contributions
-  welcome
+- ✅ Irradiance, PV power, cell temperature, 16-bit message counter
+- ✅ Today's yield — formula `raw * 0.625` Wh validated against
+  VictronConnect on 3 datapoints (10608→6630, 10672→6670, 10736→6710 Wh)
+- 🟡 Status flags (top 2 bits of byte 19) — 4 states observed (`00`/`01`/
+  `10`/`11`), no simple correlation with light level; could be gain/range
+  selection
+- 🟡 Byte 1 (state flag, toggles `0x00`/`0x80`) and byte 21 (diagnostic,
+  values `0x42`/`0x46`/`0x4a`) — role unknown
+- ✅ Bytes 22:23 (`0x07 0xfc`) confirmed constant, NOT a CRC
+- Contributions welcome
 
 ## Disclaimer
 
