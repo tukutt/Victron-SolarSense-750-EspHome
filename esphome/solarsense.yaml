@@ -1,0 +1,108 @@
+# ESPHome configuration — SolarSense 750 BLE decoder + Bluetooth proxy
+#
+# Decodes the Victron SolarSense 750 Instant Readout advertisements locally
+# and exposes them as native ESPHome sensors to Home Assistant. The ESP32
+# also acts as a passive Bluetooth proxy for any other BLE device HA already
+# supports natively.
+#
+# Required secrets in secrets.yaml:
+#   wifi_ssid:        "your-ssid"
+#   wifi_password:    "your-password"
+#   solarsense_mac:   "AA:BB:CC:DD:EE:FF"   # MAC of your SolarSense 750
+
+substitutions:
+  solarsense_mac: !secret solarsense_mac
+
+esphome:
+  name: esphome-web-5123ac
+  friendly_name: BLE Proxy
+  min_version: 2026.4.0
+  name_add_mac_suffix: false
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# --- BLE -----------------------------------------------------------------
+
+esp32_ble_tracker:
+  scan_parameters:
+    # The SolarSense broadcasts ~1 Hz; passive scan is enough.
+    active: false
+    interval: 1100ms
+    window: 1100ms
+  on_ble_advertise:
+    - mac_address: ${solarsense_mac}
+      then:
+        - lambda: |-
+            for (auto md : x.get_manufacturer_datas()) {
+              if (md.uuid.get_uuid().uuid.uuid16 != 0x02E1) continue;
+              const auto& d = md.data;
+              if (d.size() < 24 || d[0] != 0x10) continue;
+
+              uint16_t pv_power  = d[13] | (d[14] << 8);
+              uint16_t yield_raw = d[15] | (d[16] << 8);
+              uint16_t raw_irr   = d[18] | (d[19] << 8);
+
+              float irradiance = (raw_irr & 0x3FFF) / 10.0f;
+              float yield_wh   = yield_raw * 0.625f;
+              float cell_temp  = ((int)d[20] - 150) * 0.4f;
+
+              id(ss_pv_power).publish_state(pv_power);
+              id(ss_yield).publish_state(yield_wh);
+              id(ss_irradiance).publish_state(irradiance);
+              id(ss_cell_temp).publish_state(cell_temp);
+            }
+
+# Forwards every other BLE advertisement to Home Assistant so this ESP32
+# can also serve as a regular Bluetooth proxy for natively supported
+# devices (Xiaomi, Govee, Switchbot, official Victron, etc.).
+bluetooth_proxy:
+  active: false
+
+# --- Sensors exposed to Home Assistant -----------------------------------
+
+sensor:
+  - platform: template
+    name: "SolarSense Irradiance"
+    id: ss_irradiance
+    unit_of_measurement: "W/m²"
+    accuracy_decimals: 1
+    state_class: measurement
+    icon: mdi:weather-sunny
+
+  - platform: template
+    name: "SolarSense PV Power"
+    id: ss_pv_power
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+
+  - platform: template
+    name: "SolarSense Today's Yield"
+    id: ss_yield
+    unit_of_measurement: "Wh"
+    accuracy_decimals: 0
+    device_class: energy
+    state_class: total_increasing
+
+  - platform: template
+    name: "SolarSense Cell Temperature"
+    id: ss_cell_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement

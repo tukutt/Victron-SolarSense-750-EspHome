@@ -112,6 +112,43 @@ Differential analysis on a long capture:
 - The cell temperature mapping was confirmed by capturing frames at varying
   ambient temperatures.
 
+## Use it from Home Assistant via ESPHome
+
+An [ESPHome configuration](esphome/solarsense.yaml) is provided. Flash it to
+any ESP32 within BLE range of the sensor and you get four native sensors
+in Home Assistant — irradiance, PV power, today's yield, cell temperature —
+with proper `device_class` / `state_class` (the yield is exposed as
+`total_increasing` so it plugs straight into HA's Energy dashboard).
+
+The same ESP32 also runs the standard ESPHome `bluetooth_proxy:` component,
+so it can serve as a regular Bluetooth proxy for the rest of your HA
+Bluetooth devices (Xiaomi, Govee, Switchbot, official Victron, …).
+
+### Setup
+
+1. Edit `esphome/solarsense.yaml` and adjust `name`, `friendly_name`,
+   `min_version`, etc. to match your setup.
+2. Add to your ESPHome `secrets.yaml`:
+   ```yaml
+   wifi_ssid: "your-ssid"
+   wifi_password: "your-password"
+   solarsense_mac: "AA:BB:CC:DD:EE:FF"
+   ```
+3. Compile and flash:
+   ```bash
+   esphome run esphome/solarsense.yaml
+   ```
+4. The ESP32 appears in Home Assistant via the ESPHome integration; the
+   four `SolarSense …` sensors are added automatically.
+
+### Why decode on the ESP32 rather than pure BLE proxy?
+
+The `bluetooth_proxy:` component alone would forward the SolarSense
+advertisements to Home Assistant, but no HA integration currently knows
+how to decode this device. Decoding inside ESPHome turns the frames into
+clean, typed sensors immediately, while still leaving the ESP32 available
+as a proxy for everything else.
+
 ## Status / Statut
 
 - ✅ Irradiance, PV power, cell temperature, 16-bit message counter
