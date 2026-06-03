@@ -40,7 +40,10 @@ Mapping / Trame 24 bytes, manufacturer id 0x02E1:
     idx 21       : diagnostic byte, varies but not monotonically with power
                    or temperature (values 0x42, 0x46, 0x4a observed) — role
                    unknown
-    idx 22:23    : 0x07 0xfc constant (NOT a CRC)
+    idx 22       : varies slowly (0x07 -> 0x9F -> 0xAF observed over a long
+                   window, but stable over short windows); event-driven
+                   counter or diagnostic — role unknown
+    idx 23       : 0xFC observed constant so far (NOT a CRC)
 
 Dependencies / Dépendances : bleak (uv installs it automatically via the
 PEP 723 header above / uv l'installe seul via l'en-tête PEP 723 ci-dessus)
@@ -98,6 +101,7 @@ def parse(data: bytes) -> dict:
         # FR: octets non encore identifiés — exposés pour debug
         "state_flag": data[1],
         "diag_21": data[21],
+        "diag_22": data[22],  # slowly-varying diagnostic byte, role unknown
     }
 
 
@@ -110,6 +114,7 @@ def show(r: dict) -> None:
     print(f"  cell_temp    : {r['cell_temp']:.1f} °C")
     print(f"  state_flag   : 0x{r['state_flag']:02x}")
     print(f"  diag_21      : 0x{r['diag_21']:02x}")
+    print(f"  diag_22      : 0x{r['diag_22']:02x}")
     d = r["raw"]
     # EN: byte dump to help further reverse-engineering
     # FR: dump des octets pour poursuivre le reverse

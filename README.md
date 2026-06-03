@@ -41,7 +41,8 @@ capteur et décode la charge utile en direct, ou décode une trame hex collée.
 | `19` MSB  | Status flags                        | top 2 bits; `11` in sunlight, `10` in darkness       |
 | `20`      | Cell temperature / température      | `(raw - 150) * 0.4` → °C, 0.4 °C resolution          |
 | `21`      | Diagnostic byte                     | varies (`0x42`, `0x46`, `0x4a` seen), role unknown   |
-| `22:23`   | —                                   | constant `0x07 0xfc` (not a CRC)                     |
+| `22`      | Diagnostic byte                     | varies slowly (`0x07`/`0x9F`/`0xAF` seen), role unknown |
+| `23`      | —                                   | `0xFC` observed constant, role unknown               |
 
 ## Requirements
 
@@ -159,9 +160,12 @@ as a proxy for everything else.
 - 🟡 Status flags (top 2 bits of byte 19) — 4 states observed (`00`/`01`/
   `10`/`11`), no simple correlation with light level; could be gain/range
   selection
-- 🟡 Byte 1 (state flag, toggles `0x00`/`0x80`) and byte 21 (diagnostic,
-  values `0x42`/`0x46`/`0x4a`) — role unknown
-- ✅ Bytes 22:23 (`0x07 0xfc`) confirmed constant, NOT a CRC
+- 🟡 Byte 1 (state flag, toggles `0x00`/`0x80`), byte 21 (diagnostic,
+  values `0x42`/`0x46`/`0x4a`) and byte 22 (slowly-varying diagnostic) —
+  role unknown
+- ❌ Battery voltage and Low battery alarm visible in HA (via the Cerbo)
+  appear to be read through a GATT connection, not in the BLE
+  advertisement — not decodable from the broadcast frame
 - Contributions welcome
 
 ## Disclaimer
