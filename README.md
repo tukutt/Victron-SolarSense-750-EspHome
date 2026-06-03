@@ -29,9 +29,11 @@ capteur et décode la charge utile en direct, ou décode une trame hex collée.
 | --------- | ----------------------------------- | ---------------------------------------------------- |
 | `0`       | Record type                         | constant `0x10`                                      |
 | `1`       | State flag                          | toggles `0x00` ↔ `0x80`, meaning unknown             |
-| `2:4`     | Device id                           | constant `0x50 0xc0 0xff`                            |
+| `2:3` LE  | Victron product id                  | `0xC050` for the SolarSense 750                      |
+| `4`       | —                                   | constant `0xFF`, role unknown                        |
 | `5:6` LE  | Message counter / compteur          | 16-bit, useful for RX quality diagnostics            |
-| `7:12`    | Firmware / product info             | constant, first byte = `0x01` (firmware 1.01)        |
+| `7:9`     | —                                   | constant `0x01 0x05 0x14`, role unknown              |
+| `10:12`   | —                                   | constant `0x00 0x04 0x00`                            |
 | `13:14`   | Estimated PV power / puissance PV   | watts (W)                                            |
 | `15:16`   | Today's yield                       | `raw * 0.625` → Wh (validated on 3 datapoints)       |
 | `17`      | —                                   | constant `0x00`                                      |
@@ -66,6 +68,7 @@ Sample output:
 
 ```
 --- RSSI -48 dBm ---
+  product_id   : 0xC050
   counter      : 13990
   irradiance   : 46.0 W/m²   (flags=11)
   pv_power     : 391 W
@@ -114,6 +117,8 @@ Differential analysis on a long capture:
 - ✅ Irradiance, PV power, cell temperature, 16-bit message counter
 - ✅ Today's yield — formula `raw * 0.625` Wh validated against
   VictronConnect on 3 datapoints (10608→6630, 10672→6670, 10736→6710 Wh)
+- ✅ Victron product id (`0xC050`) — cross-validated with the Venus OS
+  "Device" page in VictronConnect
 - 🟡 Status flags (top 2 bits of byte 19) — 4 states observed (`00`/`01`/
   `10`/`11`), no simple correlation with light level; could be gain/range
   selection

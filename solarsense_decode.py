@@ -21,11 +21,12 @@ Tested firmware / Firmware testé : 1.01
 Mapping / Trame 24 bytes, manufacturer id 0x02E1:
     idx 0        : 0x10 record type (constant)
     idx 1        : status flag, toggles 0x00 <-> 0x80 (meaning unknown)
-    idx 2:4      : device id (constant 0x50 0xc0 0xff)
+    idx 2:3 LE   : Victron product id — 0xC050 for the SolarSense 750
+    idx 4        : 0xFF (constant, role unknown)
     idx 5:6 LE   : message counter / compteur de messages (16-bit) — useful
                    for RX quality diagnostics
-    idx 7:12     : firmware/product info (constant — first byte 0x01 matches
-                   tested firmware 1.01)
+    idx 7:9      : 0x01 0x05 0x14 (constant, role unknown)
+    idx 10:12    : 0x00 0x04 0x00 (constant)
     idx 13:14 LE : estimated PV power / puissance PV estimée (W)
     idx 15:16 LE : today's yield — raw * 0.625  -> Wh
                    (Wh = raw * 5 / 8 ; validated against VictronConnect on
@@ -66,13 +67,15 @@ def s16(v):
     return v - 0x10000 if v >= 0x8000 else v
 
 
-YIELD_SCALE_WH = 0.625  # tentative: idx15:16 * 0.625 = today's yield in Wh
+YIELD_SCALE_WH = 0.625  # idx15:16 * 0.625 = today's yield in Wh
+SOLARSENSE_750_PRODUCT_ID = 0xC050
 
 
 def parse(data: bytes) -> dict:
     # EN: Validate header byte / FR: validation de l'en-tête
     if len(data) < 24 or data[0] != 0x10:
         raise ValueError(f"Unexpected frame / trame inattendue : {data.hex()}")
+    product_id = int.from_bytes(data[2:4], "little")
     counter = int.from_bytes(data[5:7], "little")
     pv_power = int.from_bytes(data[13:15], "little")
     yield_raw = int.from_bytes(data[15:17], "little")
@@ -83,6 +86,7 @@ def parse(data: bytes) -> dict:
     cell_temp = (data[20] - 150) * 0.4
     return {
         "raw": data,
+        "product_id": product_id,
         "counter": counter,
         "pv_power": pv_power,
         "yield_raw": yield_raw,
@@ -98,13 +102,14 @@ def parse(data: bytes) -> dict:
 
 
 def show(r: dict) -> None:
+    print(f"  product_id   : 0x{r['product_id']:04X}")
     print(f"  counter      : {r['counter']}")
     print(f"  irradiance   : {r['irradiance']:.1f} W/m²   (flags={r['irr_flags']:02b})")
     print(f"  pv_power     : {r['pv_power']} W")
     print(f"  yield        : {r['yield_wh']:.1f} Wh        (raw={r['yield_raw']})")
     print(f"  cell_temp    : {r['cell_temp']:.1f} °C")
     print(f"  state_flag   : 0x{r['state_flag']:02x}")
-    print(f"  diag_21   : 0x{r['diag_21']:02x}")
+    print(f"  diag_21      : 0x{r['diag_21']:02x}")
     d = r["raw"]
     # EN: byte dump to help further reverse-engineering
     # FR: dump des octets pour poursuivre le reverse
