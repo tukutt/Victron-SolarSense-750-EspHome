@@ -159,17 +159,19 @@ Three stages:
 ## Use it from Home Assistant via ESPHome
 
 An [ESPHome configuration](esphome/solarsense.yaml) is provided. Flash it
-to any ESP32 within BLE range of the sensor and you get six native
-sensors plus a Low Battery binary sensor in Home Assistant — irradiance,
-installation power, today's yield, cell temperature, battery voltage,
-time since last sun (minutes), low battery — with proper `device_class` /
-`state_class`. The yield is exposed as `total_increasing` so it plugs
-straight into HA's Energy dashboard, and the Low Battery sensor
+to any ESP32 within BLE range of the sensor and you get **nine entities**
+in Home Assistant — six numeric sensors (irradiance, installation power,
+today's yield, cell temperature, battery voltage, time since last sun),
+two diagnostic text sensors (error code, charger error) and one
+binary sensor (low battery) — all with the right `device_class` /
+`state_class`. The yield is exposed as `total_increasing` in kWh so it
+plugs straight into HA's Energy dashboard, and the Low Battery sensor
 implements Victron's official 3.2 V trip / 3.6 V release hysteresis.
 
-The same ESP32 also runs the standard ESPHome `bluetooth_proxy:` component,
-so it can serve as a regular Bluetooth proxy for the rest of your HA
-Bluetooth devices (Xiaomi, Govee, Switchbot, official Victron, …).
+The same ESP32 also runs the standard ESPHome `bluetooth_proxy:` component
+in **active** mode, so it can serve as a full Bluetooth proxy for the
+rest of your HA Bluetooth devices (Xiaomi, Govee, Switchbot, official
+Victron, …).
 
 ### Setup
 
@@ -186,7 +188,13 @@ Bluetooth devices (Xiaomi, Govee, Switchbot, official Victron, …).
    esphome run esphome/solarsense.yaml
    ```
 4. The ESP32 appears in Home Assistant via the ESPHome integration; the
-   four `SolarSense …` sensors are added automatically.
+   nine entities (six numeric sensors, two text sensors and the Low
+   Battery binary sensor) are added automatically.
+
+> **BLE range tip.** The SolarSense is a low-power broadcaster — RSSI
+> around −98 dBm has been observed at night when the radio backs off.
+> For reliable reception, place the ESP32 as close to the sensor as
+> possible (same roof / same room ideally).
 
 ### Why decode on the ESP32 rather than pure BLE proxy?
 

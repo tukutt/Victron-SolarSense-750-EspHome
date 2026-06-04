@@ -1,8 +1,8 @@
 # ESPHome configuration — SolarSense 750 BLE decoder + Bluetooth proxy
 #
 # Decodes the Victron SolarSense 750 Instant Readout advertisements locally
-# and exposes them as native ESPHome sensors to Home Assistant. The ESP32
-# also acts as a passive Bluetooth proxy for any other BLE device HA already
+# and exposes them as native ESPHome entities to Home Assistant. The ESP32
+# also acts as an active Bluetooth proxy for any other BLE device HA
 # supports natively.
 #
 # Required secrets in secrets.yaml:
@@ -58,37 +58,45 @@ esp32_ble_tracker:
               if (d.size() < 24 || d[0] != 0x10 || d[4] != 0xFF || d[7] != 0x01)
                 continue;
 
+              uint32_t error_code   = (uint32_t)d[8]
+                                    | ((uint32_t)d[9]  << 8)
+                                    | ((uint32_t)d[10] << 16)
+                                    | ((uint32_t)d[11] << 24);
+              uint8_t  charger_err  = d[12];
               uint32_t pv_power_raw = (uint32_t)d[13]
                                     | ((uint32_t)d[14] << 8)
                                     | (((uint32_t)d[15] & 0x0F) << 16);
-              uint32_t yield_raw = ((uint32_t)d[15] >> 4)
-                                 | ((uint32_t)d[16] << 4)
-                                 | ((uint32_t)d[17] << 12);
-              uint16_t irr_raw   = (uint16_t)d[18]
-                                 | (((uint16_t)d[19] & 0x3F) << 8);
-              uint16_t temp_raw  = ((uint16_t)d[19] >> 6)
-                                 | ((uint16_t)d[20] << 2)
-                                 | (((uint16_t)d[21] & 0x01) << 10);
-              uint8_t  bat_raw   = (d[21] >> 2) | ((d[22] & 0x03) << 6);
-              uint8_t  tss_raw   = (d[22] >> 3) | ((d[23] & 0x03) << 5);
+              uint32_t yield_raw    = ((uint32_t)d[15] >> 4)
+                                    | ((uint32_t)d[16] << 4)
+                                    | ((uint32_t)d[17] << 12);
+              uint16_t irr_raw      = (uint16_t)d[18]
+                                    | (((uint16_t)d[19] & 0x3F) << 8);
+              uint16_t temp_raw     = ((uint16_t)d[19] >> 6)
+                                    | ((uint16_t)d[20] << 2)
+                                    | (((uint16_t)d[21] & 0x01) << 10);
+              uint8_t  bat_raw      = (d[21] >> 2) | ((d[22] & 0x03) << 6);
+              uint8_t  tss_raw      = (d[22] >> 3) | ((d[23] & 0x03) << 5);
+
+              char ec[16];
+              snprintf(ec, sizeof(ec), "0x%08X", error_code);
+              id(ss_error_code).publish_state(std::string(ec));
+
+              if (charger_err != 0xFF) {
+                char ce[8];
+                snprintf(ce, sizeof(ce), "0x%02X", charger_err);
+                id(ss_charger_error).publish_state(std::string(ce));
+              }
 
               if (pv_power_raw != 0xFFFFF)
-                id(ss_pv_power).publish_state((float)pv_power_raw);
+                id(ss_installation_power).publish_state((float)pv_power_raw);
               if (yield_raw != 0xFFFFF)
-                id(ss_yield).publish_state((float)yield_raw * 10.0f);
+                id(ss_yield).publish_state((float)yield_raw * 0.01f);
               if (irr_raw != 0x3FFF)
                 id(ss_irradiance).publish_state((float)irr_raw * 0.1f);
               if (temp_raw != 0x7FF)
                 id(ss_cell_temp).publish_state((float)temp_raw * 0.1f - 60.0f);
-
-              if (bat_raw != 0xFF) {
-                float v = 1.70f + (float)bat_raw * 0.01f;
-                id(ss_battery).publish_state(v);
-                // LowBattery alarm with Victron's 0.4 V hysteresis:
-                //   trip below 3.2 V, release above 3.6 V
-                if (v < 3.2f) id(ss_low_battery).publish_state(true);
-                else if (v > 3.6f) id(ss_low_battery).publish_state(false);
-              }
+              if (bat_raw != 0xFF)
+                id(ss_battery).publish_state(1.70f + (float)bat_raw * 0.01f);
 
               if (tss_raw != 0x7F) {
                 uint16_t minutes;
@@ -101,12 +109,12 @@ esp32_ble_tracker:
             }
 
 # Forwards every other BLE advertisement to Home Assistant so this ESP32
-# can also serve as a regular Bluetooth proxy for natively supported
-# devices (Xiaomi, Govee, Switchbot, official Victron, etc.).
+# also serves as a regular Bluetooth proxy for natively supported devices
+# (Xiaomi, Govee, Switchbot, official Victron, etc.).
 bluetooth_proxy:
-  active: false
+  active: true
 
-# --- Sensors exposed to Home Assistant -----------------------------------
+# --- Entities exposed to Home Assistant ----------------------------------
 
 sensor:
   - platform: template
@@ -118,8 +126,8 @@ sensor:
     icon: mdi:weather-sunny
 
   - platform: template
-    name: "SolarSense PV Power"
-    id: ss_pv_power
+    name: "SolarSense Installation Power"
+    id: ss_installation_power
     unit_of_measurement: "W"
     accuracy_decimals: 0
     device_class: power
@@ -128,8 +136,8 @@ sensor:
   - platform: template
     name: "SolarSense Today's Yield"
     id: ss_yield
-    unit_of_measurement: "Wh"
-    accuracy_decimals: 0
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 2
     device_class: energy
     state_class: total_increasing
 
@@ -158,8 +166,28 @@ sensor:
     # Quantisation is non-linear (2 min steps then 10 min then 30 min)
     # so the unit is minutes but values jump in larger increments.
 
+text_sensor:
+  - platform: template
+    name: "SolarSense Error Code"
+    id: ss_error_code
+    icon: mdi:alert-circle-outline
+
+  - platform: template
+    name: "SolarSense Charger Error"
+    id: ss_charger_error
+    icon: mdi:alert-circle-outline
+
 binary_sensor:
   - platform: template
-    name: "SolarSense Low Battery"
+    name: "Low Battery"
     id: ss_low_battery
-    device_class: battery
+    device_class: problem
+    lambda: |-
+      // Victron's official LowBattery alarm: trip below 3.2 V,
+      // release above 3.6 V (0.4 V hysteresis).
+      static bool low = false;
+      float v = id(ss_battery).state;
+      if (isnan(v)) return low;
+      if (v < 3.2) low = true;
+      else if (v > 3.6) low = false;
+      return low;
