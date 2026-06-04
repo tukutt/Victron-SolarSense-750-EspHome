@@ -47,23 +47,57 @@ esp32_ble_tracker:
     - mac_address: ${solarsense_mac}
       then:
         - lambda: |-
+            // Decodes the Victron Solar Sense bit-packed record (24-byte
+            // manufacturer advertisement, manufacturer id 0x02E1). Layout
+            // and scaling match the Victron reference implementation:
+            //   https://github.com/victronenergy/dbus-ble-sensors/blob/master/src/solarsense.c
             for (auto md : x.get_manufacturer_datas()) {
               if (md.uuid.get_uuid().uuid.uuid16 != 0x02E1) continue;
               const auto& d = md.data;
-              if (d.size() < 24 || d[0] != 0x10) continue;
+              // Validate protocol magic bytes per Victron source
+              if (d.size() < 24 || d[0] != 0x10 || d[4] != 0xFF || d[7] != 0x01)
+                continue;
 
-              uint16_t pv_power  = d[13] | (d[14] << 8);
-              uint16_t yield_raw = d[15] | (d[16] << 8);
-              uint16_t raw_irr   = d[18] | (d[19] << 8);
+              uint32_t pv_power_raw = (uint32_t)d[13]
+                                    | ((uint32_t)d[14] << 8)
+                                    | (((uint32_t)d[15] & 0x0F) << 16);
+              uint32_t yield_raw = ((uint32_t)d[15] >> 4)
+                                 | ((uint32_t)d[16] << 4)
+                                 | ((uint32_t)d[17] << 12);
+              uint16_t irr_raw   = (uint16_t)d[18]
+                                 | (((uint16_t)d[19] & 0x3F) << 8);
+              uint16_t temp_raw  = ((uint16_t)d[19] >> 6)
+                                 | ((uint16_t)d[20] << 2)
+                                 | (((uint16_t)d[21] & 0x01) << 10);
+              uint8_t  bat_raw   = (d[21] >> 2) | ((d[22] & 0x03) << 6);
+              uint8_t  tss_raw   = (d[22] >> 3) | ((d[23] & 0x03) << 5);
 
-              float irradiance = (raw_irr & 0x3FFF) / 10.0f;
-              float yield_wh   = yield_raw * 0.625f;
-              float cell_temp  = ((int)d[20] - 150) * 0.4f;
+              if (pv_power_raw != 0xFFFFF)
+                id(ss_pv_power).publish_state((float)pv_power_raw);
+              if (yield_raw != 0xFFFFF)
+                id(ss_yield).publish_state((float)yield_raw * 10.0f);
+              if (irr_raw != 0x3FFF)
+                id(ss_irradiance).publish_state((float)irr_raw * 0.1f);
+              if (temp_raw != 0x7FF)
+                id(ss_cell_temp).publish_state((float)temp_raw * 0.1f - 60.0f);
 
-              id(ss_pv_power).publish_state(pv_power);
-              id(ss_yield).publish_state(yield_wh);
-              id(ss_irradiance).publish_state(irradiance);
-              id(ss_cell_temp).publish_state(cell_temp);
+              if (bat_raw != 0xFF) {
+                float v = 1.70f + (float)bat_raw * 0.01f;
+                id(ss_battery).publish_state(v);
+                // LowBattery alarm with Victron's 0.4 V hysteresis:
+                //   trip below 3.2 V, release above 3.6 V
+                if (v < 3.2f) id(ss_low_battery).publish_state(true);
+                else if (v > 3.6f) id(ss_low_battery).publish_state(false);
+              }
+
+              if (tss_raw != 0x7F) {
+                uint16_t minutes;
+                if (tss_raw <= 29)        minutes = tss_raw * 2;
+                else if (tss_raw <= 95)   minutes = 60 + 10 * (tss_raw - 30);
+                else if (tss_raw <= 126)  minutes = 720 + 30 * (tss_raw - 96);
+                else                      minutes = tss_raw;
+                id(ss_since_sun).publish_state((float)minutes);
+              }
             }
 
 # Forwards every other BLE advertisement to Home Assistant so this ESP32
@@ -106,3 +140,26 @@ sensor:
     accuracy_decimals: 1
     device_class: temperature
     state_class: measurement
+
+  - platform: template
+    name: "SolarSense Battery Voltage"
+    id: ss_battery
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    state_class: measurement
+
+  - platform: template
+    name: "SolarSense Time Since Last Sun"
+    id: ss_since_sun
+    unit_of_measurement: "min"
+    accuracy_decimals: 0
+    icon: mdi:weather-night
+    # Quantisation is non-linear (2 min steps then 10 min then 30 min)
+    # so the unit is minutes but values jump in larger increments.
+
+binary_sensor:
+  - platform: template
+    name: "SolarSense Low Battery"
+    id: ss_low_battery
+    device_class: battery

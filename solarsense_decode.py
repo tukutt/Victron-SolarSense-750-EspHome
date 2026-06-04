@@ -4,58 +4,53 @@
 # dependencies = ["bleak"]
 # ///
 """
-solarsense_decode.py  (v2 - plaintext frames, no key needed)
-------------------------------------------------------------
+solarsense_decode.py  (v3 - aligned with official Victron source)
+-----------------------------------------------------------------
 EN: The Victron SolarSense 750 broadcasts its Instant Readout measurements
-    IN PLAINTEXT (no AES encryption) — confirmed by differential analysis
-    (the payload is nearly constant while the message counter increments,
-    bytes are strongly structured). The bindkey is therefore NOT required.
+    IN PLAINTEXT (no AES encryption), as a bit-packed record. The layout
+    matches the Victron reference implementation in
+    https://github.com/victronenergy/dbus-ble-sensors/blob/master/src/solarsense.c
 
 FR: Le Victron SolarSense 750 diffuse ses mesures Instant Readout EN CLAIR
-    (pas de chiffrement AES) : confirmé par analyse différentielle (payload
-    quasi constant alors que le compteur de messages s'incrémente, octets
-    fortement structurés). La bindkey n'est donc PAS nécessaire.
+    (pas de chiffrement AES) sous forme de bit-field. L'implémentation suit
+    le code source officiel Victron (lien ci-dessus).
 
 Tested firmware / Firmware testé : 1.01
 
-Mapping / Trame 24 bytes, manufacturer id 0x02E1:
-    idx 0        : 0x10 record type (constant)
-    idx 1        : status flag, toggles 0x00 <-> 0x80 (meaning unknown)
-    idx 2:3 LE   : Victron product id — 0xC050 for the SolarSense 750
-    idx 4        : 0xFF (constant, role unknown)
-    idx 5:6 LE   : message counter / compteur de messages (16-bit) — useful
-                   for RX quality diagnostics
-    idx 7:9      : 0x01 0x05 0x14 (constant, role unknown)
-    idx 10:12    : 0x00 0x04 0x00 (constant)
-    idx 13:14 LE : estimated PV power / puissance PV estimée (W)
-    idx 15:16 LE : today's yield — raw * 0.625  -> Wh
-                   (Wh = raw * 5 / 8 ; validated against VictronConnect on
-                   3 datapoints — 10608→6630, 10672→6670, 10736→6710 Wh)
-    idx 17       : 0x00 (constant)
-    idx 18:19 LE : irradiance, & 0x3FFF then / 10  -> W/m²
-                   (top 2 bits of idx19 = status flags; 11 seen in sunlight,
-                   10 in darkness — meaning to confirm)
-    idx 20       : cell temperature / température cellule
-                   (raw - 150) * 0.4  -> °C, 0.4 °C resolution
-    idx 21       : diagnostic byte, varies but not monotonically with power
-                   or temperature (values 0x42, 0x46, 0x4a observed) — role
-                   unknown
-    idx 22       : varies slowly (0x07 -> 0x9F -> 0xAF observed over a long
-                   window, but stable over short windows); event-driven
-                   counter or diagnostic — role unknown
-    idx 23       : 0xFC observed constant so far (NOT a CRC)
+Frame layout (24 bytes, manufacturer id 0x02E1):
 
-Dependencies / Dépendances : bleak (uv installs it automatically via the
-PEP 723 header above / uv l'installe seul via l'en-tête PEP 723 ci-dessus)
+  Header (bytes 0..7) — validated as protocol magic by the Victron source:
+    idx 0        : 0x10 record type (validated)
+    idx 1        : flag, toggles 0x00 <-> 0x80; NOT validated by source
+    idx 2:3 LE   : Victron product id — 0xC050 for the SolarSense 750
+    idx 4        : 0xFF (validated magic byte)
+    idx 5:6 LE   : message counter (16-bit) — useful for RX diagnostics
+    idx 7        : 0x01 (validated magic byte)
+
+  Bit-packed Solar Sense record (bytes 8..23, bit offsets relative to bit 0
+  of byte 8, LSB-first per Victron convention):
+    bits   0..31 : ErrorCode                  (UN32, raw bitmask)
+    bits  32..39 : Charger Error              (UN8,  NA=0xFF)
+    bits  40..59 : Installation Power         (UN20, 1 W,         NA=0xFFFFF)
+    bits  60..79 : Today's Yield              (UN20, 0.01 kWh,    NA=0xFFFFF)
+    bits  80..93 : Irradiance                 (UN14, 0.1 W/m²,    NA=0x3FFF)
+    bits  94..104: Cell Temperature           (UN11, 0.1 °C, offset -60 °C,
+                                                NA=0x7FF)
+    bit  105     : Unspecified Remnant
+    bits 106..113: Battery Voltage            (UN8,  0.01 V, offset +1.70 V,
+                                                NA=0xFF)
+    bit  114     : Tx Power Level             (0 = 0 dBm, 1 = +6 dBm)
+    bits 115..121: Time Since Last Sun        (UN7, NA=0x7F, non-linear
+                                                quantisation -> minutes,
+                                                see _tss_minutes() below)
+
+Alarms (per Victron source):
+    LowBattery: triggers when BatteryVoltage < 3.2 V, hysteresis 0.4 V
+    (stateless: this decoder simply reports voltage < 3.2 V)
 
 Usage:
     SOLARSENSE_MAC=XX:XX:XX:XX:XX:XX uv run solarsense_decode.py scan
     uv run solarsense_decode.py decode <hex>
-
-EN: Configure the sensor MAC address through the SOLARSENSE_MAC environment
-    variable (or edit the default constant below).
-FR: La MAC du capteur se configure via la variable d'environnement
-    SOLARSENSE_MAC (ou en éditant la constante par défaut ci-dessous).
 """
 
 import os
@@ -64,61 +59,107 @@ import binascii
 
 MAC = os.environ.get("SOLARSENSE_MAC", "XX:XX:XX:XX:XX:XX")
 VICTRON_MANUFACTURER_ID = 0x02E1
-
-
-def s16(v):
-    return v - 0x10000 if v >= 0x8000 else v
-
-
-YIELD_SCALE_WH = 0.625  # idx15:16 * 0.625 = today's yield in Wh
 SOLARSENSE_750_PRODUCT_ID = 0xC050
+
+# Bit-packed record starts at byte 8 of the frame
+RECORD_OFFSET = 8
+
+
+def _bits(data: bytes, start: int, length: int) -> int:
+    """Read `length` bits starting at bit offset `start` (LSB-first)."""
+    value = 0
+    for i in range(length):
+        bit_index = start + i
+        value |= ((data[bit_index // 8] >> (bit_index % 8)) & 1) << i
+    return value
+
+
+def _tss_minutes(raw: int) -> int:
+    """Time Since Last Sun: piecewise quantisation from Victron source.
+
+    raw 0..29   -> raw * 2 minutes              (0..58, 2-min steps)
+    raw 30..95  -> 60 + 10 * (raw - 30) minutes (60..710, 10-min steps)
+    raw 96..126 -> 720 + 30 * (raw - 96) minutes (720..1620, 30-min steps)
+    """
+    if raw <= 29:
+        return raw * 2
+    if raw <= 95:
+        return 60 + 10 * (raw - 30)
+    if raw <= 126:
+        return 720 + 30 * (raw - 96)
+    return raw
 
 
 def parse(data: bytes) -> dict:
-    # EN: Validate header byte / FR: validation de l'en-tête
-    if len(data) < 24 or data[0] != 0x10:
+    # Victron source validates byte 0, byte 4 and byte 7 as protocol magic
+    if (
+        len(data) < 24
+        or data[0] != 0x10
+        or data[4] != 0xFF
+        or data[7] != 0x01
+    ):
         raise ValueError(f"Unexpected frame / trame inattendue : {data.hex()}")
+
+    # Header
     product_id = int.from_bytes(data[2:4], "little")
     counter = int.from_bytes(data[5:7], "little")
-    pv_power = int.from_bytes(data[13:15], "little")
-    yield_raw = int.from_bytes(data[15:17], "little")
-    yield_wh = yield_raw * YIELD_SCALE_WH
-    raw_irr = int.from_bytes(data[18:20], "little")
-    irradiance = (raw_irr & 0x3FFF) / 10.0
-    irr_flags = data[19] >> 6
-    cell_temp = (data[20] - 150) * 0.4
+    state_flag = data[1]
+
+    # Bit-packed record (bytes 8..23)
+    rec = data[RECORD_OFFSET:]
+    error_code = _bits(rec, 0, 32)
+    charger_error_raw = _bits(rec, 32, 8)
+    pv_power_raw = _bits(rec, 40, 20)
+    yield_raw = _bits(rec, 60, 20)
+    irradiance_raw = _bits(rec, 80, 14)
+    cell_temp_raw = _bits(rec, 94, 11)
+    battery_raw = _bits(rec, 106, 8)
+    tx_power_high = _bits(rec, 114, 1)
+    since_sun_raw = _bits(rec, 115, 7)
+
+    battery_v = None if battery_raw == 0xFF else 1.70 + battery_raw * 0.01
+
     return {
         "raw": data,
+        # Header
         "product_id": product_id,
         "counter": counter,
-        "pv_power": pv_power,
-        "yield_raw": yield_raw,
-        "yield_wh": yield_wh,
-        "irradiance": irradiance,
-        "irr_flags": irr_flags,
-        "cell_temp": cell_temp,
-        # EN: bytes whose role is not yet confirmed — exposed for debugging
-        # FR: octets non encore identifiés — exposés pour debug
-        "state_flag": data[1],
-        "diag_21": data[21],
-        "diag_22": data[22],  # slowly-varying diagnostic byte, role unknown
+        "state_flag": state_flag,
+        # Decoded fields (None when the field carries its NA value)
+        "error_code": error_code,
+        "charger_error": None if charger_error_raw == 0xFF else charger_error_raw,
+        "pv_power": None if pv_power_raw == 0xFFFFF else pv_power_raw,
+        "yield_wh": None if yield_raw == 0xFFFFF else yield_raw * 10,
+        "irradiance": None if irradiance_raw == 0x3FFF else irradiance_raw * 0.1,
+        "cell_temp": None if cell_temp_raw == 0x7FF else cell_temp_raw * 0.1 - 60,
+        "battery_v": battery_v,
+        "tx_power_dbm": 6 if tx_power_high else 0,
+        "since_sun_min": None if since_sun_raw == 0x7F else _tss_minutes(since_sun_raw),
+        # Stateless low-battery flag (real alarm uses 0.4 V hysteresis)
+        "low_battery": None if battery_v is None else battery_v < 3.2,
     }
 
 
+def _fmt(value, fmt, na="—"):
+    return na if value is None else format(value, fmt)
+
+
 def show(r: dict) -> None:
-    print(f"  product_id   : 0x{r['product_id']:04X}")
-    print(f"  counter      : {r['counter']}")
-    print(f"  irradiance   : {r['irradiance']:.1f} W/m²   (flags={r['irr_flags']:02b})")
-    print(f"  pv_power     : {r['pv_power']} W")
-    print(f"  yield        : {r['yield_wh']:.1f} Wh        (raw={r['yield_raw']})")
-    print(f"  cell_temp    : {r['cell_temp']:.1f} °C")
-    print(f"  state_flag   : 0x{r['state_flag']:02x}")
-    print(f"  diag_21      : 0x{r['diag_21']:02x}")
-    print(f"  diag_22      : 0x{r['diag_22']:02x}")
+    print(f"  product_id     : 0x{r['product_id']:04X}")
+    print(f"  counter        : {r['counter']}")
+    print(f"  error_code     : 0x{r['error_code']:08x}")
+    print(f"  charger_error  : {_fmt(r['charger_error'], 'd')}")
+    print(f"  pv_power       : {_fmt(r['pv_power'], 'd')} W")
+    print(f"  yield          : {_fmt(r['yield_wh'], '.0f')} Wh")
+    print(f"  irradiance     : {_fmt(r['irradiance'], '.1f')} W/m²")
+    print(f"  cell_temp      : {_fmt(r['cell_temp'], '.1f')} °C")
+    print(f"  battery_v      : {_fmt(r['battery_v'], '.2f')} V")
+    print(f"  low_battery    : {r['low_battery']}")
+    print(f"  tx_power       : +{r['tx_power_dbm']} dBm")
+    print(f"  since_sun      : {_fmt(r['since_sun_min'], 'd')} min")
+    print(f"  state_flag     : 0x{r['state_flag']:02x}")
     d = r["raw"]
-    # EN: byte dump to help further reverse-engineering
-    # FR: dump des octets pour poursuivre le reverse
-    print("  bytes/octets : " + " ".join(f"{i}:{d[i]:02x}" for i in range(len(d))))
+    print("  bytes/octets   : " + " ".join(f"{i}:{d[i]:02x}" for i in range(len(d))))
     print()
 
 
