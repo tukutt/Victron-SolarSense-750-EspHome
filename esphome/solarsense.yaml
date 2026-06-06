@@ -14,7 +14,7 @@ substitutions:
   solarsense_mac: !secret solarsense_mac
 
 esphome:
-  name: esphome-web-5123ac
+  name: "esphome-ble-proxy"
   friendly_name: BLE Proxy
   min_version: 2026.4.0
   name_add_mac_suffix: false
@@ -27,6 +27,15 @@ esp32:
 logger:
 
 api:
+
+mqtt:
+  broker: 10.0.0.128       # IP de ton broker Mosquitto (celui de HA)
+  port: 1883
+  username: !secret mqtt_user    # si ton broker en demande
+  password: !secret mqtt_pass
+  #topic_prefix: solarsense   # topics propres et stables, indépendants du nom du node
+  discovery: false           # IMPORTANT : sinon tu auras les capteurs en DOUBLE dans HA
+                             # (une fois via l'API native, une fois via MQTT discovery)
 
 ota:
   - platform: esphome
